@@ -63,18 +63,19 @@ th{background:#174ea6;color:white}
 """
 
 
+
 def fetch_pdf(eid):
     if not eid.isdigit() or len(eid) <= 5:
         return None, None, "Invalid eID"
 
     try:
-        
-response = requests.get(
-    BASE_URL + "?eId=" + eid,
-    timeout=60,
-    headers={"User-Agent": "Mozilla/5.0"}
-)
+        url = BASE_URL + "?eId=" + eid
 
+        response = requests.get(
+            url,
+            timeout=(10, 60),
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
 
         if response.status_code != 200:
             return None, None, "HTTP " + str(response.status_code)
@@ -83,9 +84,8 @@ response = requests.get(
 
         if not content.lstrip().startswith(b"%PDF-"):
             return None, None, (
-                "PDF nahi mili. Response type: "
+                "PDF nahi mili. Content-Type: "
                 + response.headers.get("Content-Type", "unknown")
-                + ". Response shayad HTML ya error page hai."
             )
 
         reader = PdfReader(io.BytesIO(content))
@@ -103,11 +103,12 @@ response = requests.get(
         return content, text, None
 
     except requests.exceptions.Timeout:
-        return None, None, "Connect/Read timeout: UP Mines server ne samay par jawab nahi diya"
+        return None, None, "UP Mines server timeout"
     except requests.exceptions.RequestException as exc:
         return None, None, "Network error: " + type(exc).__name__
     except Exception as exc:
         return None, None, "PDF error: " + type(exc).__name__
+
 
 
 @app.route("/", methods=["GET", "POST"])
