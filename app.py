@@ -163,7 +163,7 @@ def fetch_record(kind, eid):
         response = requests.get(
             url,
             params=params,
-            timeout=20,
+            timeout=(5,12),
             headers={"User-Agent": "Mozilla/5.0"}
         )
 
