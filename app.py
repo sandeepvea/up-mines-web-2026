@@ -1,14 +1,24 @@
-
 from flask import Flask, request, render_template_string, Response
 import requests
 from bs4 import BeautifulSoup
 import csv
 import io
 import re
+import time
 
 app = Flask(__name__)
 
-BASE_URL = "https://upmines.upsdc.gov.in"
+TRANSPORTER_URL = (
+    "https://upmines.upsdc.gov.in/"
+    "Transporter/historyPrintTransporterFormVehicle.aspx"
+)
+
+# e-Form C ka purana route.
+# Is route ko portal par verify karna zaroori hai.
+EFORM_URL = (
+    "https://upmines.upsdc.gov.in/"
+    "licensee/PrintLicenseeFormVehicleCheckValidOrNot.aspx"
+)
 
 LAST_RESULTS = []
 
@@ -20,21 +30,43 @@ PAGE = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UP Mines Web Bot</title>
 <style>
-body {font-family:Arial;background:#eef2f7;padding:12px}
-main {max-width:900px;margin:auto;background:white;
-padding:18px;border-radius:14px}
-h2 {color:#174ea6;text-align:center}
-label {display:block;margin-top:12px;font-weight:bold}
-input,select,button {
-width:100%;padding:12px;margin-top:6px;
-box-sizing:border-box;border-radius:8px;border:1px solid #bbb
+body {
+    font-family: Arial, sans-serif;
+    background: #eef2f7;
+    padding: 12px;
 }
-button {background:#174ea6;color:white;border:0;margin-top:18px}
-.tablebox {overflow-x:auto;margin-top:18px}
-table {border-collapse:collapse;width:100%;font-size:12px}
-th,td {border:1px solid #ddd;padding:7px;text-align:left}
-th {background:#174ea6;color:white}
-.msg {background:#eef5ff;padding:10px;border-radius:8px}
+main {
+    max-width: 950px;
+    margin: auto;
+    background: white;
+    padding: 18px;
+    border-radius: 14px;
+}
+h2 { color: #174ea6; text-align: center; }
+label { display: block; margin-top: 13px; font-weight: bold; }
+input, select, button {
+    width: 100%;
+    padding: 12px;
+    margin-top: 6px;
+    box-sizing: border-box;
+    border-radius: 8px;
+}
+button {
+    background: #174ea6;
+    color: white;
+    border: 0;
+    margin-top: 18px;
+}
+.msg {
+    background: #eef5ff;
+    padding: 12px;
+    border-radius: 8px;
+    overflow-wrap: anywhere;
+}
+.tablebox { overflow-x: auto; margin-top: 18px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { border: 1px solid #ddd; padding: 7px; text-align: left; }
+th { background: #174ea6; color: white; }
 </style>
 </head>
 <body>
@@ -44,15 +76,17 @@ th {background:#174ea6;color:white}
 <form method="post">
 <label>Search Type</label>
 <select name="kind">
-<option value="transporter">Transporter / ISTP</option>
-<option value="eform">e-Form C</option>
+    <option value="transporter">Transporter / ISTP</option>
+    <option value="eform">e-Form C (route verify karna hoga)</option>
 </select>
 
-<label>Start ID</label>
-<input name="start_id" placeholder="Starting ID" required>
+<label>Start eID</label>
+<input name="start_id" inputmode="numeric"
+       placeholder="Starting eID" required>
 
-<label>End ID</label>
-<input name="end_id" placeholder="Ending ID" required>
+<label>End eID</label>
+<input name="end_id" inputmode="numeric"
+       placeholder="Ending eID" required>
 
 <label>Destination</label>
 <input name="destination" placeholder="DEORIA ya ALL" value="ALL">
@@ -66,17 +100,21 @@ th {background:#174ea6;color:white}
 
 {% if rows %}
 <p><b>Results found:</b> {{ rows|length }}</p>
-<a href="/download">Download CSV</a>
+<p><a href="/download">Download CSV</a></p>
 <div class="tablebox">
 <table>
+<thead>
 <tr>
 {% for h in headers %}<th>{{ h }}</th>{% endfor %}
 </tr>
+</thead>
+<tbody>
 {% for row in rows %}
 <tr>
 {% for h in headers %}<td>{{ row[h] }}</td>{% endfor %}
 </tr>
 {% endfor %}
+</tbody>
 </table>
 </div>
 {% endif %}
@@ -86,103 +124,113 @@ th {background:#174ea6;color:white}
 """
 
 
-def field(soup, *tokens):
-    """Find a value by matching HTML element IDs."""
-    for token in tokens:
-        for element in soup.find_all(id=re.compile(
-            re.escape(token), re.I
-        )):
-            value = element.get_text(" ", strip=True)
+def get_field(soup, *names):
+    """HTML IDs/labels se field ka text nikalna."""
+    for name in names:
+        pattern = re.compile(re.escape(name), re.I)
+
+        for element in soup.find_all(id=pattern):
+            value = element.get("value", "").strip()
+
             if not value:
-                value = element.get("value", "")
+                value = element.get_text(" ", strip=True)
+
             if value:
-                return value.strip()
+                return value
+
     return ""
 
 
-def fetch_record(kind, record_id):
+def fetch_record(kind, eid):
     if kind == "transporter":
-        path = (
-            "/Transporter/"
-            "PrintTransporterFormVehicleCheckValidOrNot.aspx"
-        )
-    else:
-        path = (
-            "/licensee/"
-            "PrintLicenseeFormVehicleCheckValidOrNot.aspx"
-        )
+        url = TRANSPORTER_URL
 
-    url = BASE_URL + path
+        # eID ke aakhiri 5 digits hata kar Id banao.
+        params = {
+            "i": "2",
+            "Id": eid[:-5],
+            "eID": eid,
+        }
+
+    elif kind == "eform":
+        url = EFORM_URL
+        params = {"eId": eid}
+
+    else:
+        return None, "Invalid search type"
 
     try:
         response = requests.get(
             url,
-            params={"eId": str(record_id)},
-            timeout=12,
+            params=params,
+            timeout=20,
             headers={"User-Agent": "Mozilla/5.0"}
         )
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            return None, "HTTP " + str(response.status_code)
 
         soup = BeautifulSoup(response.text, "html.parser")
 
         if kind == "transporter":
-            data = {
-                "ID Number": str(record_id),
-                "Serial Number": field(
+            record = {
+                "eID": eid,
+                "Id": eid[:-5],
+                "Serial Number": get_field(
                     soup, "SerialNumber", "Serial_Number"
                 ),
-                "Mineral": field(
+                "Mineral": get_field(
                     soup, "lbl_type_of_mining_mineral"
                 ),
-                "Quantity": field(
+                "Quantity": get_field(
                     soup, "lbl_qty_to_Transport"
                 ),
-                "Destination": field(
+                "Destination": get_field(
                     soup, "lbl_destination_district"
                 ),
-                "Generated Date": field(
+                "Generated Date": get_field(
                     soup, "txt_etp_generated_on"
                 ),
             }
         else:
-            data = {
-                "ID Number": str(record_id),
-                "e-Form C No": field(
+            record = {
+                "eID": eid,
+                "e-Form C No": get_field(
                     soup, "lbl_eForm_cNo"
                 ),
-                "Serial Number": field(
+                "Serial Number": get_field(
                     soup, "SerialNumber", "Serial_Number"
                 ),
-                "Mineral": field(
+                "Mineral": get_field(
                     soup, "lbl_type_of_mining_mineral"
                 ),
-                "Quantity": field(
+                "Quantity": get_field(
                     soup, "lbl_qty_to_Transport_Tonne"
                 ),
-                "Destination": field(
+                "Destination": get_field(
                     soup, "lbl_destination_district"
                 ),
-                "Generated Date": field(
+                "Generated Date": get_field(
                     soup, "txt_eFormC_generated_on"
-                ),
-                "Valid Upto": field(
-                    soup, "ValidUpto", "Valid_Upto",
-                    "lbl_valid_upto"
                 ),
             }
 
-        # Avoid treating a generic error page as a valid record.
-        if not any(
-            data.get(key, "").strip()
-            for key in ("Serial Number", "Mineral",
-                        "Destination", "e-Form C No")
-        ):
-            return None
+        # Agar koi expected field na mile to use success na maano.
+        useful_fields = [
+            value for key, value in record.items()
+            if key not in ("eID", "Id") and value
+        ]
 
-        return data
+        if not useful_fields:
+            return None, (
+                "Page mila, lekin expected fields nahi mile. "
+                "HTML selectors verify karne honge."
+            )
 
-    except requests.RequestException:
-        return None
+        return record, None
+
+    except requests.RequestException as exc:
+        return None, "Request error: " + str(exc)
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -202,26 +250,37 @@ def home():
         ).strip().upper()
 
         if kind not in ("transporter", "eform"):
-            message = "Invalid search type."
+            message = "Invalid Search Type."
 
-        elif not start_text.isdigit() or not end_text.isdigit():
-            message = "Start ID aur End ID numeric hone chahiye."
+        elif (
+            not start_text.isdigit()
+            or not end_text.isdigit()
+            or len(start_text) <= 5
+            or len(end_text) <= 5
+        ):
+            message = "Dono eID numeric hone chahiye aur 5 digits se lambe hon."
+
+        elif len(start_text) != len(end_text):
+            message = "Start aur End eID ki length same honi chahiye."
 
         else:
-            start_id = int(start_text)
-            end_id = int(end_text)
+            start_num = int(start_text)
+            end_num = int(end_text)
 
-            if end_id < start_id:
-                message = "End ID, Start ID se bada hona chahiye."
+            if end_num < start_num:
+                message = "End eID, Start eID se chhota hai."
 
-            elif end_id - start_id + 1 > 200:
-                message = "Ek search mein maximum 200 IDs allowed hain."
+            elif end_num - start_num > 99:
+                message = "Ek baar mein maximum 100 eID check kar sakte ho."
 
             else:
                 LAST_RESULTS = []
+                errors = 0
 
-                for record_id in range(start_id, end_id + 1):
-                    record = fetch_record(kind, record_id)
+                for number in range(start_num, end_num + 1):
+                    eid = str(number).zfill(len(start_text))
+
+                    record, error = fetch_record(kind, eid)
 
                     if record:
                         record_destination = record.get(
@@ -233,19 +292,27 @@ def home():
                             or destination == record_destination
                         ):
                             LAST_RESULTS.append(record)
+                    else:
+                        errors += 1
+
+                    # Portal par requests ka load kam rakho.
+                    time.sleep(0.25)
 
                 rows = LAST_RESULTS
 
                 if rows:
                     headers = list(rows[0].keys())
                     message = (
-                        "Search complete. "
-                        "CSV download kar sakte ho."
+                        "Search complete. Matching records: "
+                        + str(len(rows))
+                        + ". Unreadable/failed records: "
+                        + str(errors)
                     )
                 else:
                     message = (
-                        "Koi matching record nahi mila. "
-                        "URL, ID ya website response check karo."
+                        "Koi matching record nahi mila. Failed/unreadable: "
+                        + str(errors)
+                        + ". URL aur HTML fields verify karne honge."
                     )
 
     return render_template_string(
@@ -259,13 +326,15 @@ def home():
 @app.route("/download")
 def download():
     if not LAST_RESULTS:
-        return "Pehle search karo; koi result available nahi hai.", 400
+        return "Pehle search karke records nikalo.", 400
 
     output = io.StringIO()
     headers = list(LAST_RESULTS[0].keys())
 
     writer = csv.DictWriter(
-        output, fieldnames=headers, extrasaction="ignore"
+        output,
+        fieldnames=headers,
+        extrasaction="ignore"
     )
     writer.writeheader()
     writer.writerows(LAST_RESULTS)
@@ -282,4 +351,4 @@ def download():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-    
+                
