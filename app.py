@@ -68,12 +68,13 @@ def fetch_pdf(eid):
         return None, None, "Invalid eID"
 
     try:
-        response = requests.get(
-            BASE_URL,
-            params={"eId": eid},
-            timeout=(8, 15),
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        
+response = requests.get(
+    BASE_URL + "?eId=" + eid,
+    timeout=60,
+    headers={"User-Agent": "Mozilla/5.0"}
+)
+
 
         if response.status_code != 200:
             return None, None, "HTTP " + str(response.status_code)
